@@ -1,0 +1,4 @@
+ Galaxy     Supernova       Type        R.A.    Dec     InSample    Referenc
+ NGC1566    ASASSN-14ha     II      65.0059     -54.9381    ✓      Arcavietal. (2014)
+ NGC1566    SN2010el        Ia      64.9951     -54.944     ✓      Bessell&Schmidt(2010)
+ NGC1566    SN2021aefx      Ia      64.9725     -54.9481    ✓      Valentietal. (2021)

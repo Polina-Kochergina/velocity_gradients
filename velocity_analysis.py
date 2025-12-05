@@ -4,6 +4,8 @@ import re
 from matplotlib import pyplot as plt
 from matplotlib.colors import Normalize
 from matplotlib.colors import LogNorm
+from matplotlib.offsetbox import AnnotationBbox, TextArea
+from matplotlib.patches import FancyBboxPatch
 import pandas as pd
 
 from astropy.io import fits
@@ -110,14 +112,11 @@ def _create_residual_plots(observed_vel, model_vel, resid, vmax_obs=200, vmax_re
 def compute_velocity_residuals(file, telescop, rad, circ_vel, Flux, dist, PA, incl, sigma_file=None, lim=50, smooth=None, interp="cubic", shift_vel=0, plot=False, save=False, output_dir="."):
     
     
-# Загружаем данные и сохраняем КОПИИ для использования вне контекста
+    # Загружаем данные и сохраняем КОПИИ для использования вне контекста
     with fits.open(get_pkg_data_filename(file), memmap=False) as hdul:
         hdu_data = hdul[0].data.copy()
         hdu_header = hdul[0].header.copy()
 
-    with fits.open(get_pkg_data_filename(Flux), memmap=False) as hdul_flux:
-        flux_data = hdul_flux[0].data.copy()
-        flux_header = hdul_flux[0].header.copy()
     scale = np.pi * dist * 1000 / 180 / 3600
     # Теперь используем копии данных вместо оригинальных HDU объектов
     print(f"Shape of data: {hdu_data.shape}")
@@ -139,23 +138,17 @@ def compute_velocity_residuals(file, telescop, rad, circ_vel, Flux, dist, PA, in
     temp_hdu = fits.PrimaryHDU(data=hdu_data, header=hdu_header)
     distance_map = create_radius_map(temp_hdu, angle_map, dist=dist, incl=incl, telescop=telescop)
     
-
-    
-
-
-    # angle_map = create_angle_map(
-    #     hdu.data.shape, 
-    #     PA, 
-    #     hdu.header["CRPIX1"]/ smooth if smooth is not None else hdu.header["CRPIX1"],
-    #     hdu.header["CRPIX2"]/ smooth if smooth is not None else hdu.header["CRPIX2"],
-    # )
-    # distance_map = create_radius_map(hdu, angle_map, dist=dist, incl=incl, telescop=telescop)
-    
     R = np.load(rad) * scale
     V = np.load(circ_vel)
-    sort_idx = np.argsort(R)
-    R_sorted = R[sort_idx]
-    V_sorted = V[sort_idx]
+    # Удаляем Nan
+    mask = ~np.isnan(R) & ~np.isnan(V)
+    R_clean = R[mask]
+    V_clean = V[mask]
+
+    # Сортируем
+    sort_idx = np.argsort(R_clean)
+    R_sorted = R_clean[sort_idx]
+    V_sorted = V_clean[sort_idx]
 
     interpolation_methods = {
         "cubic": lambda: CubicSpline(R_sorted, V_sorted),
@@ -174,8 +167,16 @@ def compute_velocity_residuals(file, telescop, rad, circ_vel, Flux, dist, PA, in
     model_vel_map = radial_vel * np.cos(np.radians(angle_map))
 
     if telescop == "VLT_MUSE":
-        mask_bad = flux_data > lim
-        observed_vel_projected = np.where(mask_bad, (hdu_data - shift_vel)/np.sin(np.radians(incl)), np.nan)
+        if Flux is not None:
+            with fits.open(get_pkg_data_filename(Flux), memmap=False) as hdul_flux:
+                flux_data = hdul_flux[0].data.copy()
+                flux_header = hdul_flux[0].header.copy()
+            mask_bad = flux_data > lim
+            print(f'{mask_bad.shape, hdu_data.shape} mask and data')
+            observed_vel_projected = np.where(mask_bad, (hdu_data - shift_vel)/np.sin(np.radians(incl)), np.nan)
+        else:
+            observed_vel_projected = (hdu_data - shift_vel)/np.sin(np.radians(incl))
+
     elif telescop == "ALMA":
         observed_vel_projected = (hdu_data - shift_vel)/np.sin(np.radians(incl))
 
@@ -238,7 +239,7 @@ def close_all_fits_files():
         if isinstance(obj, fits.HDUList):
             try:
                 obj.close()
-                print("Закрыт открытый FITS файл")
+                # print("Закрыт открытый FITS файл")
             except:
                 pass
 
@@ -257,7 +258,7 @@ def  run_velocity_analysis(galaxy_name, telescop, dist, pa, incl, velocity_file,
         shift_vel=shift_vel, plot=plot, save=save, output_dir=output_dir
     )
     
-    print(f"Analysis completed. Results saved in {output_dir}")
+    print(f"Analysis completed.")
     return resid, model_vel_map, hdu
 
 # def plot_image_with_contour(flux_file, distance_map_file, r, bound, figsize=(6, 4), cmap='grey'):
@@ -529,7 +530,7 @@ def apply_gradient_sign_by_angle(gradient_map, angle_map, phi1, phi2, pa=222):
     
     return result_map
 
-def plot_three_panels_advanced(x, *y_arrays, angles=None, values=None, err=10, legend,
+def plot_three_panels_advanced(x, *y_arrays, angles=None, values=None, xf=None, err=10, legend,
                               titles=None, ylabels=None, colors=None, yscales=None,
                               figsize=(16, 9), xlim=(0, 360)):
     """
@@ -611,13 +612,16 @@ def plot_three_panels_advanced(x, *y_arrays, angles=None, values=None, err=10, l
     
     # Отрисовываем графики
     for i, (ax, y, color, yscale) in enumerate(zip(axes, y_arrays, colors, yscales)):
+        if i==0 and xf is not None:
+            ax.scatter(xf, y, color=color, linewidth=0.5 + i*0.5)
+        else:
+            ax.scatter(x, y, color=color, linewidth=0.5 + i*0.5)
         ax.set_yscale(yscale)
-        ax.scatter(x, y, color=color, linewidth=0.5 + i*0.5)
         ax.set_title(titles[i], fontsize=14, pad=15)
         ax.set_ylabel(ylabels[i], fontsize=12)
         ax.grid(True, alpha=0.3)
         ax.set_xlim(xlim[0], xlim[1])
-        
+            
         # Добавляем вертикальные области, если переданы angles и values
         if angles is not None and values is not None:
             for a in angles:
@@ -654,7 +658,7 @@ def safe_norm(data, method='linear'):
         
         vmin = np.percentile(positive_data, 5)
         vmax = np.percentile(positive_data, 95)
-        vmin = max(vmin, 1e-10)  # Избегаем нуля для логарифма
+        vmin = max(vmin, 1e-6)  # Избегаем нуля для логарифма
         
         try:
             return data_clean, LogNorm(vmin=vmin, vmax=vmax)
@@ -668,7 +672,7 @@ def safe_norm(data, method='linear'):
 
 
 def overlay_multiple_fits(reference_file, other_files, pdf, center_ra=None, center_dec=None, zoom=None, 
-                          percents=None, alphas=None, cmaps=None, title=None,
+                          percents=None, alphas=None, cmaps=None, title=None, mod="overlay",
                        size=200, show_individual=True, image_overlay=True, galaxy_name="galaxy_name"):
     """
     Совмещает несколько FITS-файлов с расширенными опциями
@@ -745,10 +749,11 @@ def overlay_multiple_fits(reference_file, other_files, pdf, center_ra=None, cent
         alphas = [0.8] * n_files
 
     if cmaps is None:
-        cmaps = ['viridis', 'Reds', 'Purples', 'YlOrBr', 'BuPu', 'GnBu']
-    # cmaps = ['viridis', 'inferno', 'plasma', 'magma']
-    # cmaps = ['jet', 'rainbow', 'nipy_spectral', 'gist_ncar']
-    # cmaps = ['jet', 'rainbow', 'brg', 'gist_rainbow']
+        cmaps = ['gray', 'Oranges', 'Greens', 'GnBu', 'Reds', 'Greens', 'YlOrBr', 'BuPu', 'GnBu']
+        # cmaps = ['viridis', 'inferno', 'plasma', 'magma']
+        # cmaps = ['viridis', 'tab20c', 'tab20b', 'nipy_spectral', 'gist_ncar']
+        # cmaps = ['jet', 'rainbow', 'brg', 'gist_rainbow']
+    mask_nan = np.isnan(data_cut[0])
 
     if show_individual:
         fig_individual = plt.figure(figsize=(4 * n_files, 4))
@@ -756,6 +761,8 @@ def overlay_multiple_fits(reference_file, other_files, pdf, center_ra=None, cent
         for i, (data, filename, cmap) in enumerate(zip(data_cut, all_filenames, cmaps)):
             ax = fig_individual.add_subplot(1, n_files, i + 1)
             
+
+            # Теперь безопасный вызов
             vmin = np.nanpercentile(data, 5)
             vmax = np.nanpercentile(data, 95)
             
@@ -775,37 +782,70 @@ def overlay_multiple_fits(reference_file, other_files, pdf, center_ra=None, cent
     if image_overlay:
         
         fig, ax = plt.subplots(1, 1, figsize=(6, 4))
-        ax.set_title(f'{title}')
-        # ax.set_xlabel('X [pixels]')
-        # ax.set_ylabel('Y [pixels]')
+
+        text1 = TextArea(r'$V_{xy}$', textprops=dict(color='gray', fontsize=14))
+        text2 = TextArea(' + ', textprops=dict(color='black', fontsize=14))
+        text3 = TextArea(r'$H\alpha$', textprops=dict(color='red', fontsize=14))
+        # text4 = TextArea(' + ', textprops=dict(color='black', fontsize=14))
+        # text5 = TextArea('dust(JWST f770w)', textprops=dict(color='red', fontsize=14))
+        from matplotlib.offsetbox import HPacker
+        # packer = HPacker(children=[text1, text2, text3, text4, text5],
+        packer = HPacker(children=[text1, text2, text3],
+                        sep=5,  # расстояние между элементами
+                        pad=0,
+                        align='center')
+
+        # Создаем аннотацию
+        ann_box = AnnotationBbox(packer, (0.5, 1.02), 
+                                xycoords='axes fraction',
+                                box_alignment=(0.5, 0),
+                                frameon=False)
+
+        ax.add_artist(ann_box)
         ax.axis("off")
         for i, (data, filename, cmap, percent, alpha) in enumerate(zip(data_cut, all_filenames, cmaps, percents, alphas)):
-            if i >= 4:  # ограничиваем 4 изображениями для 2x2 сетки
-                print(f'Error: нехватает цветовых карт для отображения, файлов больше 4, добавь еще cmaps')
-                break
-
-            data_clean, norm = safe_norm(data, 'linear')
+            data_clean, norm = safe_norm(data, 'log')
             if i > 0:
                 threshold = np.percentile(data_clean, 100 - percent)
-        
                 # Создаем маску
-                mask = (data >= threshold) & (~np.isnan(data))
+                mask = (data >= threshold) & (~np.isnan(data)) & (~mask_nan)
                 data_masked = np.where(mask, data_clean, np.nan)
             else:
-                data_masked = data_clean
+                # data_masked = np.where(mask_nan, np.nan, data_clean) 
+                data_masked = data_clean 
             
             im = ax.imshow(data_masked, origin='lower', cmap=cmap, norm=norm, alpha=alpha)
-            if i==0:
-                norm = simple_norm(data_masked, "log", log_a=50, percent=70)
-                im = ax.imshow(data_masked, origin='lower', cmap=cmap, norm=norm, alpha=alpha)
-                im.set_clim(vmax=1)
 
+            if i==0:
+                vmin = np.nanpercentile(data_masked, 5)
+                vmax = np.nanpercentile(data_masked, 95)
+
+                im = ax.imshow(data_masked, origin='lower', cmap=cmap, 
+                            norm=LogNorm(vmin=max(vmin, 1e-10), vmax=vmax), alpha=alpha, zorder=1)
+                im.set_clim(vmin=0.001, vmax=1)
                 cbar = plt.colorbar(im, ax=ax)
                 cbar.set_label(f'km/s/pc')
+                # ax.contour(data_masked, levels=[0.7, 0.8], zorder=10, colors="white")
+            
         pdf.savefig(fig, bbox_inches='tight', dpi=300)
         plt.tight_layout()
         plt.show()
-    
+
+    if mod == "mask":
+        mask_spiral = data_cut[1].astype(bool)
+        masked_data = np.where(~mask_spiral, data_cut[0], np.nan)
+        fig_mask, ax = plt.subplots(1, 1, figsize=(6, 4))
+        vmin = np.nanpercentile(masked_data, 5)
+        vmax = np.nanpercentile(masked_data, 95)
+        im = ax.imshow(masked_data, origin='lower', cmap="viridis", 
+                          norm=LogNorm(vmin=max(vmin, 1e-10), vmax=vmax))
+            
+        
+        ax.set_title(short_name, fontsize=9)
+        ax.set_xlabel('X [pixels]')
+        ax.set_ylabel('Y [pixels]')
+
+
     return all_data, [wcs_ref] * n_files, all_filenames
 
 
@@ -1160,6 +1200,7 @@ def calc_grad_xy(file, dist, telescop="VLT_MUSE", sigma_file=None, plot=True, zo
             sigma_data = hdul_sigma[0].data.copy()  # СОХРАНЯЕМ КОПИЮ ДАННЫХ
             print(f"shape of sigma {sigma_data.shape}")  # Используем КОПИЮ
         vel_grad_xy = np.where(np.abs(vel_grad) > sigma_data, vel_grad, np.nan)
+        # vel_grad_xy = np.where(sigma_data < 100, vel_grad_xy, np.nan)
     
     else:
         vel_grad_xy = vel_grad
@@ -1199,7 +1240,7 @@ def calc_grad_xy(file, dist, telescop="VLT_MUSE", sigma_file=None, plot=True, zo
     return vel_grad_xy / pix_pc 
 
 
-def calc_grad_r_phi(file_v, file_d, file_a, telescop, dist, PA, size=3, plot=True, save=False, slice=True):
+def calc_grad_r_phi(file_v, file_d, file_a, telescop, dist, PA, size=3, sigma_file=None, plot=True, save=False, slice=True):
     """
     Вычисляет градиенты скорости на основе разностей в подмассивах ixi.
     
@@ -1254,10 +1295,18 @@ def calc_grad_r_phi(file_v, file_d, file_a, telescop, dist, PA, size=3, plot=Tru
             grad_r[i, j] = vel_patch[max_dist_idx] - vel_patch[min_dist_idx]
             grad_phi[i, j] = vel_patch[max_angle_idx] - vel_patch[min_angle_idx]
     
-    # grad_phi = apply_gradient_sign_by_angle(grad_phi, angle, 90, 180, PA)
+    grad_phi_ = apply_gradient_sign_by_angle(grad_phi, angle, 90, 270, PA)
     # grad_phi = apply_gradient_sign_by_angle(grad_phi, angle, 270, 360, PA)
     # grad_r = apply_gradient_sign_by_angle(grad_r , angle, 90, 180, PA)
-    # grad_r = apply_gradient_sign_by_angle(grad_r, angle, 270, 360, PA)
+    grad_r_ = apply_gradient_sign_by_angle(grad_r, angle, 180, 360, PA)
+    if sigma_file is not None:
+        with fits.open(sigma_file) as hdul_sigma:
+            sigma_data = hdul_sigma[0].data.copy()  # СОХРАНЯЕМ КОПИЮ ДАННЫХ
+            print(f"shape of sigma {sigma_data.shape}")  # Используем КОПИЮ
+        grad_phi = np.where(np.abs(grad_phi) > sigma_data, grad_phi_, np.nan)
+        # grad_phi = np.where( sigma_data < 100, grad_phi, np.nan)
+        grad_r = np.where(np.abs(grad_r) > sigma_data, grad_r_, np.nan)
+        # grad_r = np.where( sigma_data < 100, grad_r, np.nan)
 
     if plot:
         create_multiple_plots(grad_r/pix_pc, grad_phi/pix_pc, vmin_max=[[-1, 1],[-1, 1]], cmaps="viridis", titles=[r"$\nabla V_r$", r"$\nabla V_{\phi}$"], colorbar_labels=['km/s/pc', 'km/s/pc'])
@@ -1354,11 +1403,11 @@ def azimuthal_scan(Flux, telescop, grad1, grad2, angle_map, distance_map, dist=2
     print(f"shape of flux {flux.shape}, grad - {grad_r.shape}, {grad_phi.shape}")
     F, x_f= slice_r_grad(flux, distance, angle, R, bound)
     indices, angles, values = find_local_maxima_scipy(x_f, F, order=1000)
-    v_phi, _ = slice_r_grad(grad_phi*pix_pc, distance, angle, R, bound)
+    v_phi, x = slice_r_grad(grad_phi*pix_pc, distance, angle, R, bound)
     v_r, _ = slice_r_grad(grad_r*pix_pc, distance, angle, R, bound)
     print(f"len of flux {F.shape}, grad - {v_r.shape}, {v_phi.shape}")
 
-    plot_three_panels_advanced(x_f, F, v_phi, v_r, angles=angles, values=values, legend=rf"{R} $\pm$ {bound} ", titles=[r'$Flux$', r'$V_{\phi}$', r'$V_r$'], ylabels=[" ", "km/s", "km/s"], err=np.nan, yscales=["log", "symlog", "symlog"])
+    plot_three_panels_advanced(x, F, v_phi, v_r, angles=angles, values=values, xf=x_f, legend=rf"{R} $\pm$ {bound} ", titles=[r'$Flux$', r'$V_{\phi}$', r'$V_r$'], ylabels=[" ", "km/s", "km/s"], err=np.nan, yscales=["log", "symlog", "symlog"])
 
 
     
@@ -1402,7 +1451,7 @@ def run_gradient_analysis(galaxy_name, telescop, dist, velocity_file, distance_f
     
     # Calculate radial and azimuthal gradients
     grad_r, grad_phi = calc_grad_r_phi(velocity_file, distance_file, angle_file, telescop, dist, PA, 
-                                       size=size, plot=plot, save=save)
+                                       size=size, sigma_file=sigma_file, plot=plot, save=save)
     
     return grad_xy, grad_r, grad_phi
 
